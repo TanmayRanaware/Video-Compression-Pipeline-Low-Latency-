@@ -52,6 +52,12 @@ void for_each_macroblock(const FrameYUV& frame,
 void for_each_macroblock_const(const FrameYUV& frame,
                                std::function<void(BlockCoord, BlockViewConst, BlockViewConst, BlockViewConst)> fn);
 
+/// Overloads for refcounted Frame (I420)
+void for_each_macroblock_const(const Frame& frame,
+                               std::function<void(BlockCoord, BlockViewConst, BlockViewConst, BlockViewConst)> fn);
+void get_macroblock_views_const(const Frame& frame, BlockCoord coord,
+                                BlockViewConst* out_y, BlockViewConst* out_u, BlockViewConst* out_v);
+
 /// Get a single macroblock view at (mb_x, mb_y). Returns empty views if out of bounds.
 void get_macroblock_views(FrameYUV& frame, BlockCoord coord,
                           BlockView* out_y, BlockView* out_u, BlockView* out_v);

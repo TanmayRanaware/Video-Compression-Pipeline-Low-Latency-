@@ -24,12 +24,17 @@ class Encoder {
 
   /// Encode one YUV frame. Returns encoded frame (raw_bytes filled for streaming).
   EncodedFrame encode(const FrameYUV& frame, const FrameMeta& meta);
+  /// Encode one YUV frame (refcounted Frame, I420).
+  EncodedFrame encode(const Frame& frame, const FrameMeta& meta);
 
   const EncoderConfig& config() const { return config_; }
 
  private:
   EncodedFrame encode_i_frame(const FrameYUV& frame, const FrameMeta& meta);
   EncodedFrame encode_p_frame(const FrameYUV& frame, const FrameMeta& meta);
+  EncodedFrame encode_i_frame(const Frame& frame, const FrameMeta& meta);
+  EncodedFrame encode_p_frame(const Frame& frame, const FrameMeta& meta);
+  void copy_frame_to_reference(const Frame& frame);
 
   EncoderConfig config_;
   std::unique_ptr<FrameYUV> reference_;

@@ -10,16 +10,14 @@
 namespace telehealth {
 namespace pipeline {
 
-/// Item between capture and convert: raw RGB + meta
+/// Item between capture and convert: refcounted RGB frame (shared across stages)
 struct CaptureItem {
-  codec::FrameRGB frame;
-  codec::FrameMeta meta;
+  std::shared_ptr<codec::Frame> frame;
 };
 
-/// Item between convert and encode: YUV + meta
+/// Item between convert and encode: refcounted I420 frame (shared across stages)
 struct ConvertedItem {
-  codec::FrameYUV frame;
-  codec::FrameMeta meta;
+  std::shared_ptr<codec::Frame> frame;
 };
 
 /// Item between encode and send: encoded frame

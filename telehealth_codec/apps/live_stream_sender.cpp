@@ -64,8 +64,7 @@ int main(int argc, char** argv) {
 
   while (count < max_frames && source->read(rgb, meta)) {
     telehealth::pipeline::CaptureItem item;
-    item.frame = std::move(rgb);
-    item.meta = meta;
+    item.frame = telehealth::codec::Frame::from_rgb(rgb, meta.frame_id, meta.timestamp_us, meta.pts_sec);
     pipeline.push_capture(std::move(item));
 
     telehealth::pipeline::EncodedItem enc;

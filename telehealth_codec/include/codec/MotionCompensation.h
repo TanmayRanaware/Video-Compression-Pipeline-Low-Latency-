@@ -16,10 +16,19 @@ class MotionCompensation {
                      const FrameYUV& ref_frame,
                      BlockCoord pos,
                      MotionVector mv) const;
+  void predict_block(BlockView pred_out,
+                     const Frame& ref_frame,
+                     BlockCoord pos,
+                     MotionVector mv) const;
 
   /// Build full predicted frame from ref and MV array (one MV per macroblock).
   void predict_frame(FrameYUV& pred_frame,
                      const FrameYUV& ref_frame,
+                     const MotionVector* mvs,
+                     int mb_cols,
+                     int mb_rows) const;
+  void predict_frame(FrameYUV& pred_frame,
+                     const Frame& ref_frame,
                      const MotionVector* mvs,
                      int mb_cols,
                      int mb_rows) const;

@@ -26,25 +26,29 @@ Pipeline::Pipeline(Config config)
 
   stages_.push_back(std::make_unique<Stage>("convert", [cap_q, conv_q, w, h]() {
     auto item = cap_q->pop(100);
-    if (!item) return true;
+    if (!item || !item->frame || item->frame->empty()) return true;
     codec::YuvConverter conv;
-    ConvertedItem out;
-    conv.rgb_to_yuv420(item->frame, out.frame);
-    out.meta = item->meta;
-    conv_q->push(std::move(out));
+    std::shared_ptr<codec::Frame> out = codec::Frame::make_i420(w, h);
+    out->set_meta(item->frame->frame_id(), item->frame->timestamp_us(), item->frame->pts_sec());
+    conv.rgb_to_yuv420(*item->frame, *out);
+    conv_q->push(ConvertedItem{std::move(out)});
     return true;
   }));
 
   stages_.push_back(std::make_unique<Stage>("encode", [conv_q, enc_q, w, h, qp, gop]() {
     auto item = conv_q->pop(100);
-    if (!item) return true;
+    if (!item || !item->frame || item->frame->empty()) return true;
     codec::EncoderConfig cfg;
     cfg.width = w; cfg.height = h; cfg.qp_default = qp; cfg.gop_size = gop;
     codec::Encoder enc(cfg);
-    codec::EncodedFrame ef = enc.encode(item->frame, item->meta);
+    codec::FrameMeta meta;
+    meta.frame_id = item->frame->frame_id();
+    meta.timestamp_us = item->frame->timestamp_us();
+    meta.pts_sec = item->frame->pts_sec();
+    codec::EncodedFrame ef = enc.encode(*item->frame, meta);
     EncodedItem out;
     out.frame = std::move(ef);
-    out.meta = item->meta;
+    out.meta = meta;
     enc_q->push(std::move(out));
     return true;
   }));

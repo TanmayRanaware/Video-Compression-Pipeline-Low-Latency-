@@ -61,6 +61,49 @@ EncodedFrame Encoder::encode(const FrameYUV& frame, const FrameMeta& meta) {
   return out;
 }
 
+EncodedFrame Encoder::encode(const Frame& frame, const FrameMeta& meta) {
+  FrameStats stats;
+  stats.frame_id = static_cast<uint32_t>(meta.frame_id);
+
+  FrameType ftype = rate_control_->choose_frame_type(stats.frame_id, nullptr);
+  EncodedFrame out;
+  out.frame_id = stats.frame_id;
+  out.timestamp_us = static_cast<uint64_t>(meta.timestamp_us);
+
+  if (ftype == FrameType::I) {
+    out = encode_i_frame(frame, meta);
+  } else {
+    out = encode_p_frame(frame, meta);
+  }
+
+  stats.bits_used = out.total_bytes() * 8;
+  out.qp = static_cast<uint8_t>(rate_control_->choose_qp(stats));
+
+  copy_frame_to_reference(frame);
+
+  out.raw_bytes.clear();
+  out.raw_bytes.insert(out.raw_bytes.end(), out.mv_bytes.begin(), out.mv_bytes.end());
+  out.raw_bytes.insert(out.raw_bytes.end(), out.coeff_bytes.begin(), out.coeff_bytes.end());
+  return out;
+}
+
+void Encoder::copy_frame_to_reference(const Frame& frame) {
+  if (!reference_) {
+    reference_ = std::make_unique<FrameYUV>();
+    reference_->allocate(frame.width(), frame.height());
+  }
+  const int w = frame.width();
+  const int h = frame.height();
+  const int sy = frame.stride_y();
+  const int suv = frame.stride_uv();
+  for (int y = 0; y < h; ++y)
+    std::memcpy(reference_->y_row(y), frame.y_row(y), static_cast<size_t>(std::min(sy, reference_->stride_y)));
+  for (int y = 0; y < h / 2; ++y) {
+    std::memcpy(reference_->u_row(y), frame.u_row(y), static_cast<size_t>(std::min(suv, reference_->stride_uv)));
+    std::memcpy(reference_->v_row(y), frame.v_row(y), static_cast<size_t>(std::min(suv, reference_->stride_uv)));
+  }
+}
+
 EncodedFrame Encoder::encode_i_frame(const FrameYUV& frame, const FrameMeta& meta) {
   EncodedFrame out;
   out.type = FrameType::I;
@@ -74,6 +117,51 @@ EncodedFrame Encoder::encode_i_frame(const FrameYUV& frame, const FrameMeta& met
   size_t coeff_offset = 0;
 
   for_each_macroblock_const(frame, [&](BlockCoord coord, BlockViewConst yv, BlockViewConst uv, BlockViewConst vv) {
+    (void)uv; (void)vv;
+    int32_t coeff[64];
+    for (int by = 0; by < 2; ++by) {
+      for (int bx = 0; bx < 2; ++bx) {
+        int16_t res[64];
+        for (int i = 0; i < 64; ++i) {
+          int yy = by * 8 + i / 8, xx = bx * 8 + i % 8;
+          res[i] = static_cast<int16_t>(yv.ptr[yy * yv.stride + xx]);
+        }
+        transform_->forward_8x8(res, 8, coeff);
+        quantizer_->quantize_8x8(coeff, out.qp);
+        entropy_->encode_block_8x8(coeff, out.qp, bs);
+      }
+    }
+    int32_t cu[64], cv[64];
+    std::memset(cu, 0, sizeof(cu));
+    std::memset(cv, 0, sizeof(cv));
+    for (int i = 0; i < 64; ++i) {
+      if (i < uv.w * uv.h) cu[i] = uv.ptr[i / uv.w * uv.stride + i % uv.w];
+      if (i < vv.w * vv.h) cv[i] = vv.ptr[i / vv.w * vv.stride + i % vv.w];
+    }
+    quantizer_->quantize_8x8(cu, out.qp);
+    quantizer_->quantize_8x8(cv, out.qp);
+    entropy_->encode_block_8x8(cu, out.qp, bs);
+    entropy_->encode_block_8x8(cv, out.qp, bs);
+  });
+
+  bs.flush_byte_align();
+  out.coeff_bytes = bs.buffer();
+  return out;
+}
+
+EncodedFrame Encoder::encode_i_frame(const Frame& frame, const FrameMeta& meta) {
+  EncodedFrame out;
+  out.type = FrameType::I;
+  out.frame_id = static_cast<uint32_t>(meta.frame_id);
+  out.timestamp_us = static_cast<uint64_t>(meta.timestamp_us);
+  out.qp = static_cast<uint8_t>(config_.qp_default);
+
+  BitstreamWriter bs;
+  int mb_cols = (frame.width() + MB_SIZE - 1) / MB_SIZE;
+  int mb_rows = (frame.height() + MB_SIZE - 1) / MB_SIZE;
+
+  for_each_macroblock_const(frame, [&](BlockCoord coord, BlockViewConst yv, BlockViewConst uv, BlockViewConst vv) {
+    (void)coord;
     (void)uv; (void)vv;
     int32_t coeff[64];
     for (int by = 0; by < 2; ++by) {
@@ -120,6 +208,64 @@ EncodedFrame Encoder::encode_p_frame(const FrameYUV& frame, const FrameMeta& met
   const FrameYUV& ref = *reference_;
   int mb_cols = (frame.width + MB_SIZE - 1) / MB_SIZE;
   int mb_rows = (frame.height + MB_SIZE - 1) / MB_SIZE;
+  mv_buffer_.resize(static_cast<size_t>(mb_cols * mb_rows));
+
+  BitstreamWriter mv_writer, coeff_writer;
+  int mb_idx = 0;
+
+  for_each_macroblock_const(frame, [&](BlockCoord coord, BlockViewConst yv, BlockViewConst uv, BlockViewConst vv) {
+    MotionResult res = config_.use_diamond_search
+        ? me_->estimate_diamond(yv, ref, coord)
+        : me_->estimate(yv, ref, coord);
+    mv_buffer_[mb_idx++] = res.mv;
+    entropy_->encode_mv(res.mv, mv_writer);
+
+    FrameYUV pred_one;
+    pred_one.allocate(MB_SIZE, MB_SIZE);
+    BlockView pv(pred_one.y_plane.data(), pred_one.stride_y, yv.w, yv.h);
+    mc_->predict_block(pv, ref, coord, res.mv);
+    BlockViewConst pvc(pred_one.y_plane.data(), pred_one.stride_y, yv.w, yv.h);
+
+    int16_t residual[256];
+    compute_residual(yv, pvc, residual);
+
+    int32_t coeff[4 * 64];
+    for (int by = 0; by < 2; ++by) {
+      for (int bx = 0; bx < 2; ++bx) {
+        int i = by * 2 + bx;
+        transform_->forward_8x8(residual + by * 8 * 16 + bx * 8, 16, coeff + i * 64);
+        quantizer_->quantize_8x8(coeff + i * 64, out.qp);
+        entropy_->encode_block_8x8(coeff + i * 64, out.qp, coeff_writer);
+      }
+    }
+    int32_t cu[64], cv[64];
+    std::memset(cu, 0, sizeof(cu));
+    std::memset(cv, 0, sizeof(cv));
+    entropy_->encode_block_8x8(cu, out.qp, coeff_writer);
+    entropy_->encode_block_8x8(cv, out.qp, coeff_writer);
+  });
+
+  mv_writer.flush_byte_align();
+  coeff_writer.flush_byte_align();
+  out.mv_bytes = mv_writer.buffer();
+  out.coeff_bytes = coeff_writer.buffer();
+  return out;
+}
+
+EncodedFrame Encoder::encode_p_frame(const Frame& frame, const FrameMeta& meta) {
+  EncodedFrame out;
+  out.type = FrameType::P;
+  out.frame_id = static_cast<uint32_t>(meta.frame_id);
+  out.timestamp_us = static_cast<uint64_t>(meta.timestamp_us);
+  out.qp = static_cast<uint8_t>(config_.qp_default);
+
+  if (!reference_ || reference_->empty()) {
+    return encode_i_frame(frame, meta);
+  }
+
+  const FrameYUV& ref = *reference_;
+  int mb_cols = (frame.width() + MB_SIZE - 1) / MB_SIZE;
+  int mb_rows = (frame.height() + MB_SIZE - 1) / MB_SIZE;
   mv_buffer_.resize(static_cast<size_t>(mb_cols * mb_rows));
 
   BitstreamWriter mv_writer, coeff_writer;

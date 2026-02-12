@@ -34,6 +34,29 @@ void YuvConverter::rgb_to_yuv420(const FrameRGB& in, FrameYUV& out) {
   }
 }
 
+void YuvConverter::rgb_to_yuv420(const Frame& in, Frame& out) {
+  if (in.empty() || in.format() != FrameFormat::RGB24) return;
+  if (out.empty() || out.format() != FrameFormat::I420) return;
+  const int w = in.width();
+  const int h = in.height();
+  if (w != out.width() || h != out.height()) return;
+
+  for (int y = 0; y < h; ++y) {
+    const uint8_t* row = in.row(y);
+    uint8_t* y_row = out.y_row(y);
+    for (int x = 0; x < w; ++x) {
+      uint8_t r = row[x * 3], g = row[x * 3 + 1], b = row[x * 3 + 2];
+      uint8_t py, pu, pv;
+      rgb_to_yuv_pixel(r, g, b, py, pu, pv);
+      y_row[x] = py;
+      if ((y & 1) == 0 && (x & 1) == 0) {
+        out.u_row(y / 2)[x / 2] = pu;
+        out.v_row(y / 2)[x / 2] = pv;
+      }
+    }
+  }
+}
+
 void YuvConverter::yuv420_to_rgb(const FrameYUV& in, FrameRGB& out) {
   if (in.empty()) return;
   out.allocate(in.width, in.height);
